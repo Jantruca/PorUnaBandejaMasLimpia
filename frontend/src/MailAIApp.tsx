@@ -1,12 +1,15 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
 
-// --- Types ---
+// =====================
+// Tipos
+// =====================
 type Email = {
   id: string;
   subject: string;
   sender: string;
-  snippet: string; // lo usamos como cuerpo de ejemplo
-  date: string; // ISO
+  snippet: string;
+  date: string;
 };
 
 type Category = {
@@ -20,103 +23,142 @@ export type MailData = {
   categories: Category[];
 };
 
-// --- Mock JSON (puedes reemplazarlo por tu JSON real) ---
+// =====================
+// Config
+// =====================
+const EMAILS_URL = "http://10.95.228.226:8000/emails";
+const ANALYSE_URL = "http://10.95.228.226:8000/analyse";
+
 const MOCK_DATA: MailData = {
   categories: [
     {
       id: "general",
       name: "General",
-      summary:
-        "Resumen semanal: 12 correos generales. Acciones pendientes: responder a 2, archivar 3.",
-      emails: [
-        {
-          id: "g-1",
-          subject: "Bienvenido a la plataforma",
-          sender: "Equipo Soporte <soporte@example.com>",
-          snippet:
-            "Gracias por registrarte. Aquí tienes algunos pasos para comenzar...",
-          date: "2025-09-18T10:24:00Z",
-        },
-        {
-          id: "g-2",
-          subject: "Factura de septiembre",
-          sender: "Facturación <billing@example.com>",
-          snippet:
-            "Adjuntamos tu factura correspondiente al período 01-30 de septiembre...",
-          date: "2025-09-21T08:14:00Z",
-        },
-      ],
-    },
-    {
-      id: "ventas",
-      name: "Ventas",
-      summary:
-        "Resumen semanal: 5 oportunidades nuevas. 2 cerradas ganadas, 1 en negociación.",
-      emails: [
-        {
-          id: "v-1",
-          subject: "Propuesta actualizada para Acme",
-          sender: "Laura (Ventas) <laura@example.com>",
-          snippet:
-            "He subido la propuesta con el nuevo pricing y condiciones...",
-          date: "2025-09-20T16:02:00Z",
-        },
-        {
-          id: "v-2",
-          subject: "Reunión con Contoso confirmada",
-          sender: "Calendario <noreply@calendar.example.com>",
-          snippet: "Evento confirmado para el martes a las 10:00 (CET)...",
-          date: "2025-09-22T09:30:00Z",
-        },
-        {
-          id: "v-3",
-          subject: "Cierre Q3 — resultados",
-          sender: "Dirección Comercial <dc@example.com>",
-          snippet: "¡Buen trabajo! En Q3 alcanzamos el 112% del objetivo...",
-          date: "2025-09-23T17:45:00Z",
-        },
-      ],
-    },
-    {
-      id: "soporte",
-      name: "Soporte",
-      summary:
-        "Resumen semanal: 8 tickets resueltos. SLA medio 3h. 1 ticket en espera del cliente.",
-      emails: [
-        {
-          id: "s-1",
-          subject: "[Ticket #1432] Error 500 al subir archivos",
-          sender: "Cliente XYZ <it@xyz.co>",
-          snippet: "Cuando intentamos subir un CSV grande, recibimos un 500...",
-          date: "2025-09-24T11:11:00Z",
-        },
-        {
-          id: "s-2",
-          subject: "[Ticket #1433] Recuperación de contraseña",
-          sender: "Cliente ABC <ops@abc.com>",
-          snippet:
-            "Un usuario no recibe el email de reset. ¿Podéis revisar el log?...",
-          date: "2025-09-24T14:52:00Z",
-        },
-      ],
+      summary: "Resumen semanal: correos generales cargados desde backend.",
+      emails: [],
     },
   ],
 };
 
-// --- Utilidades ---
+type BackendEmail = {
+  id: number;
+  threadId: string;
+  snippet: string;
+  body: string;
+  subject: string;
+  sender: string;
+  date?: string | null;
+};
+
+type EmailsPayload = {
+  emails: BackendEmail[];
+};
+
+type AnalyseCategoryBlock = {
+  global_summary?: string;
+  emails?: BackendEmail[];
+  email_count?: number;
+};
+
+type AnalysePayload = {
+  analysis: Record<string, AnalyseCategoryBlock>;
+};
+
+function safeTrim(s?: string | null): string {
+  return (s ?? "").trim();
+}
+
+function decodeMimeWord(input: string): string {
+  try {
+    const rx = /=\?([^?]+)\?([QBqb])\?([^?]+)\?=/g;
+    return input.replace(rx, (_, charset, enc, data) => {
+      const norm = String(charset).toLowerCase();
+      const bytes =
+        String(enc).toUpperCase() === "B"
+          ? Uint8Array.from(atob(data.replace(/\s+/g, "")), c => c.charCodeAt(0))
+          : new TextEncoder().encode(
+              data.replace(/_/g, " ").replace(/=([0-9A-Fa-f]{2})/g, (_, h) =>
+                String.fromCharCode(parseInt(h, 16))
+              )
+            );
+      try {
+        return new TextDecoder(norm as any).decode(bytes);
+      } catch {
+        return new TextDecoder("utf-8").decode(bytes);
+      }
+    });
+  } catch {
+    return input;
+  }
+}
+
+function normalizeSender(sender: string): string {
+  const s = safeTrim(sender);
+  if (!s) return "Desconocido";
+  return s.replace(/^"|"$/g, "");
+}
+
 function formatDate(dateISO: string) {
   try {
     const d = new Date(dateISO);
+    if (isNaN(d.getTime())) return "—";
     return new Intl.DateTimeFormat("es-ES", {
       dateStyle: "medium",
       timeStyle: "short",
     }).format(d);
   } catch {
-    return dateISO;
+    return "—";
   }
 }
 
-// --- UI ---
+function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)+/g, "");
+}
+
+function mapBackendEmails(items: BackendEmail[]): Email[] {
+  const nowISO = new Date().toISOString();
+  return (items || [])
+    .map((e) => {
+      const subject = safeTrim(e.subject);
+      const decodedSubject = subject ? decodeMimeWord(subject) : "(Sin asunto)";
+      const snippet = safeTrim(e.snippet) || safeTrim(e.body) || "(Sin contenido)";
+      const date = safeTrim(e.date || "") || nowISO;
+      return {
+        id: `g-${String(e.id)}`,
+        subject: decodedSubject || "(Sin asunto)",
+        sender: normalizeSender(e.sender || "Desconocido"),
+        snippet,
+        date,
+      } as Email;
+    })
+    .sort((a, b) => {
+      const ta = Date.parse(a.date);
+      const tb = Date.parse(b.date);
+      if (!isNaN(ta) && !isNaN(tb)) return tb - ta;
+      return parseInt(b.id.slice(2)) - parseInt(a.id.slice(2));
+    });
+}
+
+function mapAnalyseToCategories(payload: AnalysePayload): Category[] {
+  const blocks = payload?.analysis || {};
+  const result: Category[] = [];
+  for (const [name, block] of Object.entries(blocks)) {
+    const emails = mapBackendEmails(block.emails || []);
+    result.push({
+      id: slugify(name) || `cat-${result.length + 1}`,
+      name,
+      summary: safeTrim(block.global_summary) || "",
+      emails,
+    });
+  }
+  return result.sort((a, b) => b.emails.length - a.emails.length);
+}
+
 function Sidebar({
   categories,
   selectedId,
@@ -142,8 +184,6 @@ function Sidebar({
                 <span className="sidebar-item-name">{c.name}</span>
                 <span className="sidebar-item-count">{c.emails.length}</span>
               </div>
-              {/* Comentado: si quisieras ver el resumen aquí, descomenta */}
-              {/* <div className="sidebar-item-summary">{c.summary}</div> */}
             </button>
           );
         })}
@@ -186,17 +226,23 @@ function EmailDetail({ email, onBack }: { email: Email; onBack: () => void }) {
       <div className="email-detail-meta">
         <span>{email.sender}</span> · <span>{formatDate(email.date)}</span>
       </div>
-      <div className="email-detail-body">
-        {email.snippet || "Sin contenido"}
-      </div>
+      <div className="email-detail-body">{email.snippet || "Sin contenido"}</div>
     </div>
   );
 }
 
-function CategoryContent({ category }: { category: Category }) {
-  // No mostramos el resumen por defecto
+function CategoryContent({
+  category,
+  isLoading,
+  error,
+  onAnalyse,
+}: {
+  category: Category;
+  isLoading?: boolean;
+  error?: string | null;
+  onAnalyse?: () => void;
+}) {
   const [openedEmailId, setOpenedEmailId] = useState<string | null>(null);
-
   const opened = category.emails.find((e) => e.id === openedEmailId) || null;
 
   return (
@@ -205,12 +251,23 @@ function CategoryContent({ category }: { category: Category }) {
         <>
           <header className="content-header">
             <h1>{category.name}</h1>
-            {category.id !== "general" && (
-              <p className="content-summary">{category.summary}</p>
+            {category.id === "general" && (
+              <button onClick={onAnalyse} className="analyse-btn">
+                ANALIZAR MEDIANTE IA
+              </button>
             )}
-            {/* Si quisieras mostrar un botón para ver el resumen: */}
-            {/* <p className="content-summary">{category.summary}</p> */}
+            {category.id !== "general" && category.summary && (
+              <ReactMarkdown className="content-summary">{category.summary}</ReactMarkdown>
+            )}
           </header>
+
+          {category.id === "general" && isLoading && (
+            <div className="loading">Cargando correos...</div>
+          )}
+          {category.id === "general" && error && (
+            <div className="error">No se pudieron cargar los correos: {error}</div>
+          )}
+
           <EmailList emails={category.emails} onOpen={setOpenedEmailId} />
         </>
       ) : (
@@ -220,10 +277,78 @@ function CategoryContent({ category }: { category: Category }) {
   );
 }
 
-// --- Componente principal ---
 export default function MailAIApp({ data = MOCK_DATA }: { data?: MailData }) {
-  const categories = data.categories || [];
+  const [dataState, setDataState] = useState<MailData>(data);
+  const categories = dataState.categories || [];
+
   const [selectedId, setSelectedId] = useState<string>(categories[0]?.id ?? "");
+
+  const [loadingGeneral, setLoadingGeneral] = useState<boolean>(false);
+  const [errorGeneral, setErrorGeneral] = useState<string | null>(null);
+
+  const [loadingAnalyse, setLoadingAnalyse] = useState<boolean>(false);
+  const [errorAnalyse, setErrorAnalyse] = useState<string | null>(null);
+
+  useEffect(() => {
+    const ac1 = new AbortController();
+    let cancelled = false;
+
+    async function loadGeneral() {
+      try {
+        setLoadingGeneral(true);
+        setErrorGeneral(null);
+        const res = await fetch(EMAILS_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+          signal: ac1.signal,
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as EmailsPayload;
+        const mapped = mapBackendEmails(json?.emails || []);
+        if (!cancelled) {
+          setDataState((prev) => ({
+            ...prev,
+            categories: (prev.categories || []).map((c) =>
+              c.id === "general" ? { ...c, emails: mapped } : c
+            ),
+          }));
+        }
+      } catch (err: any) {
+        if (!cancelled) setErrorGeneral(err?.message || "Error desconocido");
+      } finally {
+        if (!cancelled) setLoadingGeneral(false);
+      }
+    }
+
+    loadGeneral();
+    return () => {
+      cancelled = true;
+      ac1.abort();
+    };
+  }, []);
+
+  async function handleAnalyse() {
+    try {
+      setLoadingAnalyse(true);
+      setErrorAnalyse(null);
+      const res = await fetch(ANALYSE_URL);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = (await res.json()) as AnalysePayload;
+      const dynCats = mapAnalyseToCategories(json);
+      setDataState((prev) => {
+        const general = (prev.categories || []).find((c) => c.id === "general") || MOCK_DATA.categories[0];
+        return {
+          ...prev,
+          categories: [general, ...dynCats],
+        };
+      });
+    } catch (err: any) {
+      setErrorAnalyse(err?.message || "Error desconocido");
+    } finally {
+      setLoadingAnalyse(false);
+    }
+  }
 
   const selectedCategory = useMemo(
     () => categories.find((c) => c.id === selectedId) || categories[0],
@@ -242,7 +367,12 @@ export default function MailAIApp({ data = MOCK_DATA }: { data?: MailData }) {
         onSelect={setSelectedId}
       />
       {selectedCategory ? (
-        <CategoryContent category={selectedCategory} />
+        <CategoryContent
+          category={selectedCategory}
+          isLoading={selectedCategory.id === "general" ? loadingGeneral : loadingAnalyse}
+          error={selectedCategory.id === "general" ? errorGeneral : errorAnalyse}
+          onAnalyse={handleAnalyse}
+        />
       ) : (
         <section className="content">
           <header className="content-header">
